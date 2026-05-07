@@ -11,8 +11,11 @@ Canadian Policyholder Portal MVP scaffold implementing PRD-010 selected issues:
 ### Frontend + Backend together
 
 - Run both: `npm run dev` (installs `client/` and `server/` deps on first run if `node_modules/` is missing)
-- Frontend: `http://localhost:3080/policy/ON-123-456-789`
+- Login page: `http://localhost:3080/login`
+- Frontend (after login): `http://localhost:3080/policy/ON-123-456-789`
 - Backend health check: `GET http://localhost:4080/health`
+
+For local development, MFA uses a dummy TOTP code: `000000` (overridable via `DUMMY_TOTP_CODE`, only honored when `NODE_ENV` is not `production`).
 
 ### Backend (Express)
 
