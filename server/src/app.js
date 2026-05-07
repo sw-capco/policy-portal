@@ -2,6 +2,7 @@ const express = require("express");
 const helmet = require("helmet");
 
 const { authRouter } = require("./routes/auth");
+const { apiAuthRouter } = require("./routes/apiAuth");
 const { policyRouter } = require("./routes/policy");
 
 function createApp() {
@@ -13,6 +14,7 @@ function createApp() {
   app.get("/health", (_req, res) => res.json({ ok: true }));
 
   app.use("/auth", authRouter);
+  app.use("/api/auth", apiAuthRouter);
   app.use("/policy", policyRouter);
 
   // Consistent error shape
@@ -31,4 +33,3 @@ function createApp() {
 }
 
 module.exports = { createApp };
-
