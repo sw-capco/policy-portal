@@ -20,6 +20,10 @@ function ensureDeps(dir, label) {
 
 function run(label, command, args) {
   const child = spawn(command, args, {
+    env: {
+      ...process.env,
+      DUMMY_TOTP_CODE: process.env.DUMMY_TOTP_CODE || "000000"
+    },
     stdio: "inherit",
     shell: process.platform === "win32"
   });

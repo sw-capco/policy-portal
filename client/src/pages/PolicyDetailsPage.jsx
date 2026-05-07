@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
+import React, { useEffect, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
 import { fetchPolicyDetails, downloadProofOfInsurance } from "../services/policyService.js";
 import PolicyHeader from "../components/PolicyHeader.jsx";
 import CoverageCard from "../components/CoverageCard.jsx";
@@ -7,13 +7,19 @@ import VehicleCard from "../components/VehicleCard.jsx";
 
 export default function PolicyDetailsPage() {
   const { policyNumber } = useParams();
+  const navigate = useNavigate();
   const [policy, setPolicy] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  const authToken = useMemo(() => window.localStorage.getItem("session_token") || "", []);
+  const authToken = window.localStorage.getItem("session_token") || "";
 
   useEffect(() => {
+    if (!authToken) navigate(`/login?next=${encodeURIComponent(`/policy/${policyNumber}`)}`, { replace: true });
+  }, [authToken, navigate, policyNumber]);
+
+  useEffect(() => {
+    if (!authToken) return;
     let alive = true;
     setLoading(true);
     setError(null);
@@ -67,13 +73,6 @@ export default function PolicyDetailsPage() {
           </div>
         </>
       ) : null}
-      {!authToken ? (
-        <p style={{ marginTop: 16, color: "#475467" }}>
-          No session token found. For local demo, create one by calling `POST /auth/login` and `POST /auth/mfa/enroll` / `POST /auth/mfa/verify`, then set
-          `session_token` in localStorage.
-        </p>
-      ) : null}
     </div>
   );
 }
-
