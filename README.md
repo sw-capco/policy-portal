@@ -8,11 +8,17 @@ Canadian Policyholder Portal MVP scaffold implementing PRD-010 selected issues:
 
 ## Local development
 
+### Frontend + Backend together
+
+- Run both: `npm run dev` (installs `client/` and `server/` deps on first run if `node_modules/` is missing)
+- Frontend: `http://localhost:3080/policy/ON-123-456-789`
+- Backend health check: `GET http://localhost:4080/health`
+
 ### Backend (Express)
 
 - Install deps (first time): `cd server && npm i`
 - Run server: `cd server && npm run dev`
-- Health check: `GET http://localhost:4000/health`
+- Health check: `GET http://localhost:4080/health`
 
 Demo policyholder (in-memory seed):
 - email: `demo@example.com`
@@ -23,9 +29,9 @@ Demo policyholder (in-memory seed):
 
 - Install deps (first time): `cd client && npm i`
 - Run dev server: `cd client && npm run dev`
-- Open: `http://localhost:3000/policy/ON-123-456-789`
+- Open: `http://localhost:3080/policy/ON-123-456-789`
 
-The Vite dev server proxies `/auth` and `/policy` to `http://localhost:4000`.
+The Vite dev server proxies `/auth` and `/policy` to `http://localhost:4080`.
 
 ## AI context files
 
