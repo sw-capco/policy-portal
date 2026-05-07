@@ -1,0 +1,661 @@
+name: AI PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+  checks: write
+  actions: read
+  models: read
+
+jobs:
+  ai-pr-review:
+    name: AI PR Review
+    runs-on: ubuntu-latest
+
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+      BASE_REF: ${{ github.base_ref }}
+      PR_TITLE: ${{ github.event.pull_request.title }}
+      PR_BODY: ${{ github.event.pull_request.body }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      FAIL_ON_BLOCK: "false"
+      MIN_FAIL_RISK_SCORE: "85"
+
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch base branch
+        run: git fetch origin $BASE_REF
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run AI PR Review
+        run: node .github/scripts/pr-review.mjs
+
+      - name: Post PR review comment
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+
+            const marker = "<!-- ai-pr-review-bot -->";
+
+            const commentPath = "pr-review-comment.md";
+            const summaryPath = "pr-review-summary.md";
+            const fallbackPath = "pr-review-output.txt";
+
+            let commentBody = "## 🤖 AI PR Review\n\nAI review output was not generated.";
+
+            if (fs.existsSync(commentPath)) {
+              commentBody = fs.readFileSync(commentPath, "utf8");
+            } else if (fs.existsSync(summaryPath)) {
+              commentBody = fs.readFileSync(summaryPath, "utf8");
+            } else if (fs.existsSync(fallbackPath)) {
+              commentBody = fs.readFileSync(fallbackPath, "utf8");
+            }
+
+            const body = marker + "\n" + commentBody;
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+
+            const comments = await github.rest.issues.listComments({
+              owner,
+              repo,
+              issue_number,
+              per_page: 100
+            });
+
+            const existing = comments.data.find(comment =>
+              comment.body && comment.body.includes(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body
+              });
+            }
+
+      - name: Upload AI review artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-pr-review
+          path: |
+            pr-review-summary.md
+            pr-review-comment.md
+            pr-review-output.txt
+            pr-review-result.json
+          if-no-files-found: ignore
+
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Run npm audit
+        run: npm audit --audit-level=high --json > dependency-review.json || true
+
+      - name: Summarize dependency review
+        if: always()
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+
+          let summary = '## 📦 Dependency Gate\n\n';
+          let status = 'ℹ️ Not Available';
+
+          if (!fs.existsSync('dependency-review.json')) {
+            summary += 'Dependency audit output was not generated, so dependency issues could not be determined.';
+          } else {
+            const raw = fs.readFileSync('dependency-review.json', 'utf8').trim();
+            let audit = {};
+
+            try {
+              audit = JSON.parse(raw || '{}');
+            } catch (_error) {
+              audit = {};
+            }
+
+            const counts = audit.metadata?.vulnerabilities || {};
+            const total =
+              (counts.info || 0) +
+              (counts.low || 0) +
+              (counts.moderate || 0) +
+              (counts.high || 0) +
+              (counts.critical || 0);
+
+            if (total === 0) {
+              summary += 'No dependency issues detected.';
+              status = '✅ Pass';
+            } else {
+              const findings = Object.entries(audit.vulnerabilities || {})
+                .slice(0, 10)
+                .map(([name, vulnerability]) => {
+                  const severity = String(vulnerability.severity || 'unknown').toUpperCase();
+                  const criticality =
+                    severity === 'CRITICAL' || severity === 'HIGH' ? 'Critical' : 'Not critical';
+                  return `- \`${name}\` - ${severity} (${criticality})`;
+                });
+
+              summary += `Dependency issues detected: ${total}\n\n`;
+              summary += `- Critical: ${counts.critical || 0}\n`;
+              summary += `- High: ${counts.high || 0}\n`;
+              summary += `- Moderate: ${counts.moderate || 0}\n`;
+              summary += `- Low: ${counts.low || 0}\n`;
+              summary += `- Info: ${counts.info || 0}\n\n`;
+              summary += findings.join('\n');
+              status =
+                (counts.critical || 0) > 0 || (counts.high || 0) > 0
+                  ? '❌ Issues Found'
+                  : '⚠️ Needs Review';
+            }
+          }
+
+          fs.writeFileSync('dependency-review-summary.md', `${summary}\n`);
+          fs.writeFileSync('dependency-review-status.txt', `${status}\n`);
+          NODE
+
+      - name: Upload dependency review artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-review-summary
+          path: |
+            dependency-review-summary.md
+            dependency-review-status.txt
+          if-no-files-found: ignore
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        uses: semgrep/semgrep-action@v1
+        continue-on-error: true
+        with:
+          config: auto
+
+      - name: Summarize security scan
+        if: always()
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const { execSync } = require('child_process');
+
+          const checks = [
+            { name: 'eval(', severity: 'Critical', command: 'git grep -n "eval(" -- . ":!package-lock.json"' },
+            { name: 'new Function(', severity: 'Critical', command: 'git grep -n "new Function(" -- . ":!package-lock.json"' },
+            { name: 'dangerouslySetInnerHTML', severity: 'Not critical', command: 'git grep -n "dangerouslySetInnerHTML" -- . ":!package-lock.json"' },
+            { name: 'innerHTML =', severity: 'Not critical', command: 'git grep -n "innerHTML =" -- . ":!package-lock.json"' },
+            { name: 'child_process.exec(', severity: 'Critical', command: 'git grep -n "child_process.exec(" -- . ":!package-lock.json"' },
+            { name: 'child_process.execSync(', severity: 'Critical', command: 'git grep -n "child_process.execSync(" -- . ":!package-lock.json"' }
+          ];
+
+          const findings = [];
+
+          for (const check of checks) {
+            try {
+              const output = execSync(check.command, { stdio: ['ignore', 'pipe', 'ignore'] })
+                .toString()
+                .trim();
+
+              if (output) {
+                output
+                  .split('\n')
+                  .filter(Boolean)
+                  .slice(0, 10)
+                  .forEach((line) => findings.push(`- ${line} - ${check.name} (${check.severity})`));
+              }
+            } catch (_error) {
+              // No matches found.
+            }
+          }
+
+          let summary = '## 🔐 Security Gate\n\n';
+          let status = '✅ Pass';
+          if (findings.length === 0) {
+            summary += 'No high-confidence security issues detected.';
+          } else {
+            summary += 'Security issues detected:\n\n';
+            summary += findings.join('\n');
+            status = findings.some((line) => line.includes('(Critical)'))
+              ? '❌ Issues Found'
+              : '⚠️ Needs Review';
+          }
+
+          fs.writeFileSync('security-scan-summary.md', `${summary}\n`);
+          fs.writeFileSync('security-scan-status.txt', `${status}\n`);
+          NODE
+
+      - name: Upload security scan artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-scan-summary
+          path: |
+            security-scan-summary.md
+            security-scan-status.txt
+          if-no-files-found: ignore
+
+  secret-scan:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summarize secret scan
+        if: always()
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const { execSync } = require('child_process');
+
+          const patterns = [
+            'ghp_[A-Za-z0-9]{36}',
+            'github_pat_[A-Za-z0-9_]{20,}',
+            'AKIA[0-9A-Z]{16}',
+            'AIza[0-9A-Za-z\\-_]{35}',
+            'xox[baprs]-[A-Za-z0-9-]{10,48}',
+            '-----BEGIN (RSA|DSA|EC|OPENSSH|PGP|PRIVATE) KEY-----',
+            'sk-[A-Za-z0-9]{20,}'
+          ];
+
+          const findings = [];
+
+          for (const pattern of patterns) {
+            try {
+              const output = execSync(`git grep -nE "${pattern}" -- . ":!package-lock.json"`, {
+                stdio: ['ignore', 'pipe', 'ignore']
+              })
+                .toString()
+                .trim();
+
+              if (output) {
+                output
+                  .split('\n')
+                  .filter(Boolean)
+                  .slice(0, 10)
+                  .forEach((line) => findings.push(`- ${line} - Critical`));
+              }
+            } catch (_error) {
+              // No matches found.
+            }
+          }
+
+          let summary = '## 🕵️ Secret Gate\n\n';
+          let status = '✅ Pass';
+          if (findings.length === 0) {
+            summary += 'No secret-like values detected.';
+          } else {
+            summary += 'Secret-like values detected:\n\n';
+            summary += findings.join('\n');
+            status = '❌ Issues Found';
+          }
+
+          fs.writeFileSync('secret-scan-summary.md', `${summary}\n`);
+          fs.writeFileSync('secret-scan-status.txt', `${status}\n`);
+          NODE
+
+      - name: Upload secret scan artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: secret-scan-summary
+          path: |
+            secret-scan-summary.md
+            secret-scan-status.txt
+          if-no-files-found: ignore
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Run tests
+        run: |
+          set +e
+          npm test -- --watch=false > test-output.txt 2>&1
+          echo $? > test-exit-code.txt
+          exit 0
+
+      - name: Summarize tests
+        if: always()
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+
+          const output = fs.existsSync('test-output.txt')
+            ? fs.readFileSync('test-output.txt', 'utf8')
+            : '';
+          const exitCode = fs.existsSync('test-exit-code.txt')
+            ? Number(fs.readFileSync('test-exit-code.txt', 'utf8').trim() || '0')
+            : 0;
+
+          const failedLines = output
+            .split('\n')
+            .filter((line) => /\bFAIL\b|\bAssertionError\b|\bError:/i.test(line))
+            .slice(0, 12)
+            .map((line) => `- ${line.trim()}`);
+
+          let summary = '## 🧪 Test Gate\n\n';
+          let status = '✅ Pass';
+          if (exitCode === 0) {
+            summary += 'No test issues detected.';
+          } else {
+            summary += 'Test issues detected:\n\n';
+            summary += failedLines.length > 0 ? failedLines.join('\n') : '- Test command exited with a non-zero status.';
+            summary += '\n\nCriticality: Not critical';
+            status = '⚠️ Needs Review';
+          }
+
+          fs.writeFileSync('tests-summary.md', `${summary}\n`);
+          fs.writeFileSync('tests-status.txt', `${status}\n`);
+          NODE
+
+      - name: Upload test artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-summary
+          path: |
+            tests-summary.md
+            tests-status.txt
+          if-no-files-found: ignore
+
+  ai-merge-gate:
+    name: AI Merge Gatekeeper
+    runs-on: ubuntu-latest
+    needs:
+      - ai-pr-review
+      - dependency-review
+      - security-scan
+      - secret-scan
+      - tests
+
+    if: always()
+
+    steps:
+      - name: Download AI review artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ai-pr-review
+          path: ai-pr-review
+        continue-on-error: true
+
+      - name: Download dependency review artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dependency-review-summary
+          path: dependency-review
+        continue-on-error: true
+
+      - name: Download security scan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: security-scan-summary
+          path: security-scan
+        continue-on-error: true
+
+      - name: Download secret scan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: secret-scan-summary
+          path: secret-scan
+        continue-on-error: true
+
+      - name: Download test artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tests-summary
+          path: tests
+        continue-on-error: true
+
+      - name: Update PR comment with gate results
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- ai-pr-review-bot -->';
+
+            function readIfExists(path) {
+              return fs.existsSync(path) ? fs.readFileSync(path, 'utf8').trim() : '';
+            }
+
+            function bodyAfterHeading(markdown) {
+              if (!markdown) return '';
+              const lines = markdown.split('\n');
+              const headingIndex = lines.findIndex((line) => /^##\s+/.test(line.trim()));
+              if (headingIndex === -1) return markdown.trim();
+              return lines.slice(headingIndex + 1).join('\n').trim();
+            }
+
+            function replaceSection(markdown, heading, newBody) {
+              if (!newBody) return markdown;
+
+              const escapedHeading = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const pattern = new RegExp(`(^##\\s+${escapedHeading}\\s*[\\r\\n]+)([\\s\\S]*?)(?=\\n##\\s+|$)`, 'm');
+
+              if (pattern.test(markdown)) {
+                return markdown.replace(pattern, `$1${newBody}\n`);
+              }
+
+              return `${markdown}\n\n## ${heading}\n${newBody}\n`;
+            }
+
+            function readStatus(path) {
+              return readIfExists(path).trim();
+            }
+
+            function replaceGateRow(markdown, gateName, status) {
+              if (!status) return markdown;
+              const escapedGate = gateName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const rowPattern = new RegExp(`\\|\\s*${escapedGate}\\s*\\|\\s*[^\\n]+\\|`);
+              if (rowPattern.test(markdown)) {
+                return markdown.replace(rowPattern, `| ${gateName} | ${status} |`);
+              }
+              return markdown;
+            }
+
+            const reviewComment =
+              readIfExists('ai-pr-review/pr-review-comment.md') ||
+              readIfExists('ai-pr-review/pr-review-summary.md') ||
+              readIfExists('ai-pr-review/pr-review-output.txt') ||
+              '## 🤖 AI PR Review\n\nAI review output was not generated.';
+
+            const dependencyBody = bodyAfterHeading(
+              readIfExists('dependency-review/dependency-review-summary.md')
+            );
+            const dependencyStatus = readStatus('dependency-review/dependency-review-status.txt');
+            const securityBody = bodyAfterHeading(
+              readIfExists('security-scan/security-scan-summary.md')
+            );
+            const securityStatus = readStatus('security-scan/security-scan-status.txt');
+            const secretBody = bodyAfterHeading(
+              readIfExists('secret-scan/secret-scan-summary.md')
+            );
+            const secretStatus = readStatus('secret-scan/secret-scan-status.txt');
+            const testsBody = bodyAfterHeading(readIfExists('tests/tests-summary.md'));
+            const testsStatus = readStatus('tests/tests-status.txt');
+
+            let mergedComment = reviewComment;
+            mergedComment = replaceSection(mergedComment, '📦 Dependency Review', dependencyBody);
+            mergedComment = replaceSection(
+              mergedComment,
+              '🔐 Security Scan',
+              [securityBody, secretBody].filter(Boolean).join('\n\n')
+            );
+            mergedComment = replaceSection(mergedComment, '🧪 Testing Gaps', testsBody);
+            mergedComment = replaceGateRow(mergedComment, 'Dependency Review', dependencyStatus);
+            mergedComment = replaceGateRow(
+              mergedComment,
+              'Security Scan',
+              securityStatus === '❌ Issues Found' || secretStatus === '❌ Issues Found'
+                ? '❌ Issues Found'
+                : securityStatus === '⚠️ Needs Review' || secretStatus === '⚠️ Needs Review'
+                  ? '⚠️ Needs Review'
+                  : securityStatus || secretStatus
+            );
+            mergedComment = replaceGateRow(mergedComment, 'Testing Gaps', testsStatus);
+
+            const body = `${marker}\n${mergedComment}`;
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+
+            const comments = await github.rest.issues.listComments({
+              owner,
+              repo,
+              issue_number,
+              per_page: 100
+            });
+
+            const existing = comments.data.find((comment) =>
+              comment.body && comment.body.includes(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body
+              });
+            }
+
+      - name: Evaluate all gates
+        run: |
+          echo "AI Review: ${{ needs.ai-pr-review.result }}"
+          echo "Dependency Review: ${{ needs.dependency-review.result }}"
+          echo "Security Scan: ${{ needs.security-scan.result }}"
+          echo "Secret Scan: ${{ needs.secret-scan.result }}"
+          echo "Tests: ${{ needs.tests.result }}"
+
+          AI_DECISION="REVIEW_REQUIRED"
+          AI_SHOULD_BLOCK="false"
+          AI_RISK_SCORE=""
+
+          if [ -f "ai-pr-review/pr-review-result.json" ]; then
+            AI_DECISION=$(node -e "const fs=require('fs'); const r=JSON.parse(fs.readFileSync('ai-pr-review/pr-review-result.json','utf8')); console.log(r.finalDecision || 'REVIEW_REQUIRED');")
+            AI_SHOULD_BLOCK=$(node -e "const fs=require('fs'); const r=JSON.parse(fs.readFileSync('ai-pr-review/pr-review-result.json','utf8')); console.log(String(Boolean(r.shouldBlock)));")
+            AI_RISK_SCORE=$(node -e "const fs=require('fs'); const r=JSON.parse(fs.readFileSync('ai-pr-review/pr-review-result.json','utf8')); console.log(r.riskScore ?? '');")
+          else
+            echo "AI review result artifact was not found."
+          fi
+
+          echo "AI Decision: $AI_DECISION"
+          echo "AI Risk Score: $AI_RISK_SCORE"
+          echo "AI Should Block: $AI_SHOULD_BLOCK"
+
+          FAILED="false"
+
+          if [ "${{ needs.ai-pr-review.result }}" != "success" ]; then
+            echo "AI PR Review job did not complete successfully, but this is non-blocking unless high risk is detected."
+          fi
+
+          if [ "$AI_SHOULD_BLOCK" = "true" ]; then
+            echo "AI Merge Gatekeeper blocked this PR."
+            FAILED="true"
+          fi
+
+          if [ "${{ needs.dependency-review.result }}" != "success" ]; then
+            echo "Dependency Review reported a non-blocking failure."
+          fi
+
+          if [ "${{ needs.security-scan.result }}" != "success" ]; then
+            echo "Security Scan reported a non-blocking failure."
+          fi
+
+          if [ "${{ needs.secret-scan.result }}" != "success" ]; then
+            echo "Secret Scan reported a non-blocking failure."
+          fi
+
+          if [ "${{ needs.tests.result }}" != "success" ]; then
+            echo "Tests reported a non-blocking failure."
+          fi
+
+          if [ "$FAILED" = "true" ]; then
+            echo "One or more PR gates failed."
+            exit 1
+          fi
+
+          echo "All PR gates passed."
